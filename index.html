@@ -134,6 +134,7 @@
   }
   tr:last-child td { border-bottom: none; }
   tr.row-organic td { color: var(--muted); }
+  td.filled { color: var(--accent2); }
 
   .info-box {
     margin-top: 14px; padding: 14px 16px;
@@ -197,8 +198,8 @@
       placeholder="從 Excel 選取含表頭的範圍 → Ctrl+C → 在此 Ctrl+V"></textarea>
     <div class="hint">
       讀取欄位：<b>game · device · 廣告目標 · 媒體 · area · 欲花總預算 · 月總下載</b><br>
-      自動排除彙總列（Overall / 整體 / 雙平台 / 廣告ALL）及子廣告活動<br>
-      子廣告活動辨識：含 <code>/</code>、含中文活動字（名單/付費/動態/大戶/站內/尊榮/一般）、中英混合、含廣告類型代號（VO/LAL/AEO/AAA/smart+ 等）
+      自動排除彙總列及子廣告活動<br>
+      <b>Organic 列若 area 為空，自動補同 device 區段的國家代碼</b>
     </div>
     <div class="game-map">
       <span class="game-tag">game 對照：</span>
@@ -219,7 +220,7 @@
 
     <div id="preview-wrap">
       <div class="preview-title">
-        <span>// 預覽結果</span>
+        <span>// 預覽結果（綠色 = 自動補上的值）</span>
         <span id="row-count"></span>
       </div>
       <div class="table-scroll">
@@ -241,24 +242,18 @@
 </div>
 
 <script>
-// ── 對照表 ──────────────────────────────────────────────────────────
 const GAME_MAP = {
-  "印尼合併": 99,
-  "印尼德撲": 38,
-  "中文德撲": 19,
-  "wowslots": 77
+  "印尼合併": 99, "印尼德撲": 38, "中文德撲": 19, "wowslots": 77
 };
 const DEVICE_MAP = { "an": 0, "ios": 1 };
 const OUT_COLS = [
   "起始日期","結束日期","平台","遊戲","媒體名稱","廣告活動",
   "國家","優化方式","動能分類","預算","預估安裝數"
 ];
-
 const AGG_RE = /^(整體|雙平台|廣告ALL|.+Overall)$/i;
 
 let csvContent = "";
 
-// ── 工具 ────────────────────────────────────────────────────────────
 function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
 function fmtDate(y, m, d) { return y + "/" + m + "/" + d; }
 function cleanNum(s) {
@@ -271,43 +266,45 @@ function norm(s) { return String(s||"").trim().toLowerCase(); }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-
 function extractGoalFromOverall(s) {
   const m = String(s).match(/^(.+?)Overall$/);
   return m ? m[1].trim() : null;
 }
 
-// ── 子廣告活動辨識 ──────────────────────────────────────────────────
-// 凡符合任一條件，視為子廣告活動，自動排除
 function looksLikeSubCampaign(media) {
   const s = String(media || "").trim();
   if (!s) return false;
-
-  // 1. 含斜線 (站內/FB動態名單)
   if (s.includes('/')) return true;
-
-  // 2. 中英混合 (真實媒體名稱都是純英文)
   const hasChinese = /[\u4e00-\u9fa5]/.test(s);
   const hasLatin   = /[A-Za-z]/.test(s);
   if (hasChinese && hasLatin) return true;
-
-  // 3. 含廣告活動相關中文關鍵字
   const cnKeywords = ['名單','付費','大戶','動態','站內','尊榮','一般'];
   if (cnKeywords.some(k => s.includes(k))) return true;
-
-  // 4. 含廣告類型代號 (作為獨立 token 才算，避免誤判單一品牌)
-  //    例如 "domino VO"、"poker LAL VO"、"poker AEO"、"poker smart+"
   const tokens = s.split(/\s+/);
   if (tokens.length > 1) {
-    const acronyms = ['VO','LAL','AEO','AAA','ABO','CBO'];   // 大小寫敏感
+    const acronyms = ['VO','LAL','AEO','AAA','ABO','CBO'];
     if (tokens.some(t => acronyms.includes(t))) return true;
     if (tokens.some(t => /^smart\+?$/i.test(t))) return true;
   }
-
   return false;
 }
 
-// ── 主邏輯 ──────────────────────────────────────────────────────────
+// ── 推斷 device 區段的代表國家（眾數） ───────────────────────────────
+function inferDeviceCountry(rows, deviceLowerCase) {
+  const counts = {};
+  rows.forEach(r => {
+    if (norm(r.device) !== deviceLowerCase) return;
+    const a = (r.area || "").trim();
+    if (!a) return;
+    if (norm(r.media) === "organic") return;            // Organic 自己不算
+    if (AGG_RE.test(r.media || "")) return;              // 彙總列不算
+    counts[a] = (counts[a] || 0) + 1;
+  });
+  let best = "", max = 0;
+  for (const k in counts) if (counts[k] > max) { max = counts[k]; best = k; }
+  return best;
+}
+
 function generate() {
   const raw = document.getElementById('paste-area').value.trim();
   if (!raw) return setStatus("⚠ 請先貼上表1資料", "err");
@@ -337,18 +334,14 @@ function generate() {
   for (let i = 1; i < lines.length; i++) {
     const cells = lines[i].split('\t');
     const get = name => (cells[idx[name]] ?? "").trim();
-
     const gameRaw   = get("game")   || lastGame;
     const deviceRaw = get("device") || lastDevice;
     if (get("game"))   lastGame   = get("game");
     if (get("device")) lastDevice = get("device");
-
     raws.push({
       game: gameRaw, device: deviceRaw,
-      goal: get("廣告目標"),
-      media: get("媒體"),
-      area: get("area"),
-      budget: get("欲花總預算"),
+      goal: get("廣告目標"), media: get("媒體"),
+      area: get("area"), budget: get("欲花總預算"),
       installs: get("月總下載")
     });
   }
@@ -376,17 +369,22 @@ function generate() {
     }
   }
 
-  // Pass 3: 過濾 + 組裝
+  // Pass 3: 預先推斷每個 device 的代表國家
+  const deviceCountry = {};
+  for (const d in byDeviceIdx) deviceCountry[d] = inferDeviceCountry(raws, d);
+
+  // Pass 4: 過濾 + 組裝
   const out = [];
   const keptMedia = new Map();
   const excludedMedia = new Map();
   const unknownGames = new Set();
+  let autoFilledCountry = 0;
 
   raws.forEach((r, i) => {
     const media = r.media;
     if (!media) return;
-    if (AGG_RE.test(media)) return;                     // 彙總列
-    if (looksLikeSubCampaign(media)) {                  // 子廣告活動
+    if (AGG_RE.test(media)) return;
+    if (looksLikeSubCampaign(media)) {
       excludedMedia.set(media, (excludedMedia.get(media) || 0) + 1);
       return;
     }
@@ -397,11 +395,19 @@ function generate() {
     let goal = r.goal || segGoals[i] || "";
     const isOrganic = norm(media) === "organic";
     let optim = "";
-    if (isOrganic) {
-      goal = "自然";
-      optim = "";
-    } else {
-      optim = (platNum === 1) ? "安裝" : goal;
+    if (isOrganic) { goal = "自然"; optim = ""; }
+    else optim = (platNum === 1) ? "安裝" : goal;
+
+    // 國家欄自動補：若空白則用同 device 區段的代表國家
+    let country = (r.area || "").trim();
+    let countryFilled = false;
+    if (!country) {
+      const inferred = deviceCountry[norm(r.device)];
+      if (inferred) {
+        country = inferred;
+        countryFilled = true;
+        autoFilledCountry++;
+      }
     }
 
     const gameKey = (r.game in GAME_MAP)
@@ -416,22 +422,21 @@ function generate() {
       "起始日期": start, "結束日期": end,
       "平台": platNum, "遊戲": gameNum,
       "媒體名稱": media, "廣告活動": "",
-      "國家": r.area, "優化方式": optim, "動能分類": "",
+      "國家": country, "優化方式": optim, "動能分類": "",
       "預算": cleanNum(r.budget),
       "預估安裝數": cleanNum(r.installs),
-      _organic: isOrganic
+      _organic: isOrganic,
+      _countryFilled: countryFilled
     });
   });
 
   if (out.length === 0) return setStatus("⚠ 沒有解析到任何有效列", "err");
 
-  // 排序：AN(0) → IOS(1)，同平台內 Organic 排最後
   out.sort((a, b) => {
     if (a.平台 !== b.平台) return a.平台 - b.平台;
     return (a._organic ? 1 : 0) - (b._organic ? 1 : 0);
   });
 
-  // CSV
   const csvLines = [OUT_COLS.join(",")];
   out.forEach(r => {
     csvLines.push(OUT_COLS.map(c => {
@@ -447,6 +452,7 @@ function generate() {
 
   let msg = "✓ 完成！輸出 " + out.length + " 列";
   if (excludedMedia.size > 0) msg += "，排除 " + excludedMedia.size + " 個子廣告活動";
+  if (autoFilledCountry > 0) msg += "，自動補上 " + autoFilledCountry + " 個國家欄位";
   let type = "ok";
   if (unknownGames.size > 0) {
     msg += "（⚠ 未對應的 game：" + [...unknownGames].join("、") + "）";
@@ -465,7 +471,8 @@ function renderPreview(rows) {
     const cls = r._organic ? "row-organic" : "";
     html += '<tr class="' + cls + '">' + OUT_COLS.map(c => {
       const v = r[c];
-      return "<td>" + (v === "" || v == null ? "" : escapeHtml(String(v))) + "</td>";
+      const cellCls = (c === "國家" && r._countryFilled) ? ' class="filled"' : '';
+      return "<td" + cellCls + ">" + (v === "" || v == null ? "" : escapeHtml(String(v))) + "</td>";
     }).join("") + "</tr>";
   });
   html += "</tbody>";
@@ -478,13 +485,12 @@ function renderChips(wrapId, listId, dataMap, kind) {
   if (!dataMap || dataMap.size === 0) { wrap.classList.add('hide'); return; }
   wrap.classList.remove('hide');
   list.innerHTML = '';
-  const entries = [...dataMap.entries()].sort((a,b) => b[1] - a[1]);
-  for (const [name, count] of entries) {
+  [...dataMap.entries()].sort((a,b) => b[1] - a[1]).forEach(([name, count]) => {
     const chip = document.createElement('span');
     chip.className = 'chip ' + kind;
     chip.textContent = name + " ×" + count;
     list.appendChild(chip);
-  }
+  });
 }
 
 function downloadCSV() {
@@ -504,36 +510,27 @@ function setStatus(msg, type) {
   el.className = type === "ok" ? "status-ok" : type === "warn" ? "status-warn" : "status-err";
 }
 
-// 範例（混合多個媒體與多種子廣告活動）
 function loadSample() {
   const sample = [
     "game\t類別\tdevice\t廣告目標\t媒體\tarea\t欲花總預算\t月總下載",
-    "印尼合併\t成效型\tAN\t自然\tOrganic\t\t\t27000",
-    "\t\tAN\t含金\tFB\tID\t450000\t8090",
-    "\t\tAN\t\tdomino VO\tID\t198000\t4400",
-    "\t\tAN\t\tpoker LAL VO\tID\t135000\t1350",
-    "\t\tAN\t\tpoker AEO\tID\t117000\t2340",
-    "\t\tAN\t\tTiktok\tID\t912000\t11055",
-    "\t\tAN\t\tpoker smart+\tID\t270000\t2250",
-    "\t\tAN\t\tpoker尊榮LAL\tID\t165000\t1100",
-    "\t\tAN\t\tmoloco_int\tID\t207000\t6900",
-    "\t\tAN\t\tAppsflyer\tID\t13257\t",
-    "\t\tAN\t\t含金Overall\t\t1582257\t26045",
+    "印尼合併\t成效型\tAN\t自然\tOrganic\t\t\t35870",
+    "\t\tAN\t含金\tFB\tID\t450000\t10700",
+    "\t\tAN\t\tTiktok\tID\t912000\t14913",
+    "\t\tAN\t\tmoloco_int\tID\t207000\t8625",
+    "\t\tAN\t\tAppsflyer\tID\t17354\t",
+    "\t\tAN\t\t含金Overall\t\t1586354\t34238",
     "\t\tAN\t回流\tFB\tID\t29700\t149",
-    "\t\tAN\t\t站內/FB動態名單\tID\t29700\t149",
     "\t\tAN\t\tTiktok\tID\t59400\t322",
-    "\t\tAN\t\t大戶名單\tID\t29700\t248",
-    "\t\tAN\t\t一般付費\tID\t29700\t74",
-    "\t\tAN\t\tAppsflyer\tTW\t235\t",
-    "\t\tAN\t\t回流Overall\t\t89100\t470",
-    "印尼合併\t\tIOS\t自然\tOrganic\t\t\t2040",
-    "\t\tIOS\t含金\tApple Search Ads\tID\t120000\t750",
-    "\t\tIOS\t\tFB\tID\t30000\t120",
-    "\t\tIOS\t\tAppsflyer\tID\t435\t",
-    "\t\tIOS\t\t安裝Overall\t\t150435\t870"
+    "\t\tAN\t\tAppsflyer\tID\t235\t",
+    "\t\tAN\t\t回流Overall\t\t89335\t471",
+    "印尼合併\t\tIOS\t自然\tOrganic\t\t\t2120",
+    "\t\tIOS\t含金\tApple Search Ads\tID\t120000\t816",
+    "\t\tIOS\t\tFB\tID\t30000\t143",
+    "\t\tIOS\t\tAppsflyer\tID\t480\t",
+    "\t\tIOS\t\t安裝Overall\t\t150480\t959"
   ].join("\n");
   document.getElementById('paste-area').value = sample;
-  setStatus("已載入範例（含子廣告活動：domino VO, poker AEO, 站內/FB動態名單 等）", "warn");
+  setStatus("已載入範例（Organic 列的 area 故意留空，測試自動補齊）", "warn");
 }
 </script>
 </body>
