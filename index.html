@@ -134,25 +134,27 @@
   }
   tr:last-child td { border-bottom: none; }
   tr.row-organic td { color: var(--muted); }
-  tr.row-new td { color: var(--accent2); }
 
-  .detected-wrap {
+  .info-box {
     margin-top: 14px; padding: 14px 16px;
     background: var(--surface2); border: 1px solid var(--border);
-    border-radius: 8px; display: none;
+    border-radius: 8px;
   }
-  .detected-title {
+  .info-title {
     font-family: var(--mono); font-size: 11px;
-    color: var(--accent2); letter-spacing: 0.08em;
-    margin-bottom: 8px;
+    letter-spacing: 0.08em; margin-bottom: 8px;
   }
+  .info-title.ok  { color: var(--accent2); }
+  .info-title.ex  { color: var(--warn); }
+  .info-sub { font-size: 11px; color: var(--muted); margin-bottom: 8px; font-family: var(--mono); }
   .chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
   .chip {
     background: var(--bg); border: 1px solid var(--border);
     border-radius: 6px; padding: 4px 10px;
     font-family: var(--mono); font-size: 11px;
-    color: var(--accent2);
   }
+  .chip.ok { color: var(--accent2); }
+  .chip.ex { color: var(--warn); }
 
   .actions {
     display: flex; gap: 12px; align-items: center;
@@ -162,6 +164,7 @@
     display: flex; justify-content: space-between; align-items: center;
     margin-bottom: 8px;
   }
+  .hide { display: none; }
 </style>
 </head>
 <body>
@@ -180,7 +183,7 @@
       </div>
       <div class="field">
         <label>月份 MONTH</label>
-        <input type="number" id="inp-month" value="5" min="1" max="12">
+        <input type="number" id="inp-month" value="6" min="1" max="12">
       </div>
     </div>
   </div>
@@ -193,8 +196,9 @@
     <textarea id="paste-area" rows="10"
       placeholder="從 Excel 選取含表頭的範圍 → Ctrl+C → 在此 Ctrl+V"></textarea>
     <div class="hint">
-      讀取欄位：<b>game · 類別 · device · 廣告目標 · 媒體 · area · 欲花總預算 · 月總下載</b><br>
-      <b>所有媒體值自動納入</b>，僅排除彙總列（Overall / 整體 / 雙平台 / 廣告ALL）
+      讀取欄位：<b>game · device · 廣告目標 · 媒體 · area · 欲花總預算 · 月總下載</b><br>
+      自動排除彙總列（Overall / 整體 / 雙平台 / 廣告ALL）及子廣告活動<br>
+      子廣告活動辨識：含 <code>/</code>、含中文活動字（名單/付費/動態/大戶/站內/尊榮/一般）、中英混合、含廣告類型代號（VO/LAL/AEO/AAA/smart+ 等）
     </div>
     <div class="game-map">
       <span class="game-tag">game 對照：</span>
@@ -222,37 +226,39 @@
         <table id="preview-table"></table>
       </div>
 
-      <div class="detected-wrap" id="detected-wrap">
-        <div class="detected-title">✓ 自動偵測到的媒體</div>
-        <div class="chip-list" id="chip-list"></div>
+      <div class="info-box hide" id="kept-wrap">
+        <div class="info-title ok">✓ 已納入的媒體</div>
+        <div class="chip-list" id="kept-list"></div>
+      </div>
+
+      <div class="info-box hide" id="excluded-wrap">
+        <div class="info-title ex">⚠ 自動排除（判定為子廣告活動）</div>
+        <div class="info-sub">如有誤判，請告知並補上規則例外</div>
+        <div class="chip-list" id="excluded-list"></div>
       </div>
     </div>
   </div>
 </div>
 
 <script>
+// ── 對照表 ──────────────────────────────────────────────────────────
 const GAME_MAP = {
   "印尼合併": 99,
   "印尼德撲": 38,
   "中文德撲": 19,
-  "Wowslots": 77,
-  "wowslots": 77,
-  "WowSlots": 77
+  "wowslots": 77
 };
-
-const DEVICE_MAP = { "AN": 0, "IOS": 1, "iOS": 1, "ios": 1 };
-
-const ALWAYS_SKIP_PATTERNS = [
-  /Overall$/i, /^整體$/, /^雙平台$/, /^廣告ALL$/i
-];
-
+const DEVICE_MAP = { "an": 0, "ios": 1 };
 const OUT_COLS = [
   "起始日期","結束日期","平台","遊戲","媒體名稱","廣告活動",
   "國家","優化方式","動能分類","預算","預估安裝數"
 ];
 
+const AGG_RE = /^(整體|雙平台|廣告ALL|.+Overall)$/i;
+
 let csvContent = "";
 
+// ── 工具 ────────────────────────────────────────────────────────────
 function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
 function fmtDate(y, m, d) { return y + "/" + m + "/" + d; }
 function cleanNum(s) {
@@ -261,12 +267,47 @@ function cleanNum(s) {
   if (v === "" || isNaN(Number(v))) return "";
   return Number(v);
 }
-function normalizeMedia(s) { return String(s||"").trim().toLowerCase(); }
-function isAggregationRow(s) { return ALWAYS_SKIP_PATTERNS.some(re => re.test(s)); }
+function norm(s) { return String(s||"").trim().toLowerCase(); }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function extractGoalFromOverall(s) {
+  const m = String(s).match(/^(.+?)Overall$/);
+  return m ? m[1].trim() : null;
+}
+
+// ── 子廣告活動辨識 ──────────────────────────────────────────────────
+// 凡符合任一條件，視為子廣告活動，自動排除
+function looksLikeSubCampaign(media) {
+  const s = String(media || "").trim();
+  if (!s) return false;
+
+  // 1. 含斜線 (站內/FB動態名單)
+  if (s.includes('/')) return true;
+
+  // 2. 中英混合 (真實媒體名稱都是純英文)
+  const hasChinese = /[\u4e00-\u9fa5]/.test(s);
+  const hasLatin   = /[A-Za-z]/.test(s);
+  if (hasChinese && hasLatin) return true;
+
+  // 3. 含廣告活動相關中文關鍵字
+  const cnKeywords = ['名單','付費','大戶','動態','站內','尊榮','一般'];
+  if (cnKeywords.some(k => s.includes(k))) return true;
+
+  // 4. 含廣告類型代號 (作為獨立 token 才算，避免誤判單一品牌)
+  //    例如 "domino VO"、"poker LAL VO"、"poker AEO"、"poker smart+"
+  const tokens = s.split(/\s+/);
+  if (tokens.length > 1) {
+    const acronyms = ['VO','LAL','AEO','AAA','ABO','CBO'];   // 大小寫敏感
+    if (tokens.some(t => acronyms.includes(t))) return true;
+    if (tokens.some(t => /^smart\+?$/i.test(t))) return true;
+  }
+
+  return false;
+}
+
+// ── 主邏輯 ──────────────────────────────────────────────────────────
 function generate() {
   const raw = document.getElementById('paste-area').value.trim();
   if (!raw) return setStatus("⚠ 請先貼上表1資料", "err");
@@ -290,83 +331,125 @@ function generate() {
   const missing = needed.filter(c => !(c in idx));
   if (missing.length) return setStatus("⚠ 缺少必要欄位：" + missing.join("、"), "err");
 
-  const out = [];
-  const detectedMedia = new Map();   // 紀錄所有讀到的媒體
-  const unknownGames = new Set();
-  let lastGame = "", lastDevice = "", lastTarget = "";
-
+  // Pass 1: 讀全部列
+  const raws = [];
+  let lastGame = "", lastDevice = "";
   for (let i = 1; i < lines.length; i++) {
     const cells = lines[i].split('\t');
     const get = name => (cells[idx[name]] ?? "").trim();
 
     const gameRaw   = get("game")   || lastGame;
     const deviceRaw = get("device") || lastDevice;
-    const targetRaw = get("廣告目標") || lastTarget;
     if (get("game"))   lastGame   = get("game");
     if (get("device")) lastDevice = get("device");
-    if (get("廣告目標")) lastTarget = get("廣告目標");
 
-    const media = get("媒體");
-    if (!media) continue;
+    raws.push({
+      game: gameRaw, device: deviceRaw,
+      goal: get("廣告目標"),
+      media: get("媒體"),
+      area: get("area"),
+      budget: get("欲花總預算"),
+      installs: get("月總下載")
+    });
+  }
 
-    // 只排除彙總列；其他媒體一律自動納入
-    if (isAggregationRow(media)) continue;
+  // Pass 2: XXOverall 回推廣告目標
+  const segGoals = new Array(raws.length).fill(null);
+  const byDeviceIdx = {};
+  raws.forEach((r, i) => {
+    const d = norm(r.device);
+    if (!d) return;
+    (byDeviceIdx[d] = byDeviceIdx[d] || []).push(i);
+  });
+  for (const d in byDeviceIdx) {
+    const indices = byDeviceIdx[d];
+    let segStart = 0;
+    for (let k = 0; k < indices.length; k++) {
+      const i = indices[k];
+      const goal = raws[i].media ? extractGoalFromOverall(raws[i].media) : null;
+      if (goal) {
+        for (let kk = segStart; kk < k; kk++) {
+          if (segGoals[indices[kk]] == null) segGoals[indices[kk]] = goal;
+        }
+        segStart = k + 1;
+      }
+    }
+  }
 
-    const area = get("area");
-    const budget = cleanNum(get("欲花總預算"));
-    const installs = cleanNum(get("月總下載"));
+  // Pass 3: 過濾 + 組裝
+  const out = [];
+  const keptMedia = new Map();
+  const excludedMedia = new Map();
+  const unknownGames = new Set();
 
-    const platNum = DEVICE_MAP[deviceRaw];
-    if (platNum === undefined) continue;
-
-    // 遊戲對照：找不到則留空並紀錄
-    const gameNum = (gameRaw in GAME_MAP) ? GAME_MAP[gameRaw] : "";
-    if (gameRaw && !(gameRaw in GAME_MAP)) unknownGames.add(gameRaw);
-
-    const isOrganic = normalizeMedia(media) === "organic";
-    let optim = "";
-    if (!isOrganic) {
-      if (platNum === 1) optim = "安裝";
-      else optim = targetRaw;
+  raws.forEach((r, i) => {
+    const media = r.media;
+    if (!media) return;
+    if (AGG_RE.test(media)) return;                     // 彙總列
+    if (looksLikeSubCampaign(media)) {                  // 子廣告活動
+      excludedMedia.set(media, (excludedMedia.get(media) || 0) + 1);
+      return;
     }
 
-    detectedMedia.set(media, (detectedMedia.get(media) || 0) + 1);
+    const platNum = DEVICE_MAP[norm(r.device)];
+    if (platNum === undefined) return;
+
+    let goal = r.goal || segGoals[i] || "";
+    const isOrganic = norm(media) === "organic";
+    let optim = "";
+    if (isOrganic) {
+      goal = "自然";
+      optim = "";
+    } else {
+      optim = (platNum === 1) ? "安裝" : goal;
+    }
+
+    const gameKey = (r.game in GAME_MAP)
+      ? r.game
+      : Object.keys(GAME_MAP).find(k => norm(k) === norm(r.game));
+    const gameNum = gameKey ? GAME_MAP[gameKey] : "";
+    if (r.game && !gameKey) unknownGames.add(r.game);
+
+    keptMedia.set(media, (keptMedia.get(media) || 0) + 1);
 
     out.push({
       "起始日期": start, "結束日期": end,
       "平台": platNum, "遊戲": gameNum,
       "媒體名稱": media, "廣告活動": "",
-      "國家": area, "優化方式": optim, "動能分類": "",
-      "預算": budget, "預估安裝數": installs,
-      _organic: isOrganic,
-      _gameRaw: gameRaw
+      "國家": r.area, "優化方式": optim, "動能分類": "",
+      "預算": cleanNum(r.budget),
+      "預估安裝數": cleanNum(r.installs),
+      _organic: isOrganic
     });
-  }
+  });
 
   if (out.length === 0) return setStatus("⚠ 沒有解析到任何有效列", "err");
 
-  // 排序：AN(0) → IOS(1)，Organic 排同平台最後
+  // 排序：AN(0) → IOS(1)，同平台內 Organic 排最後
   out.sort((a, b) => {
     if (a.平台 !== b.平台) return a.平台 - b.平台;
     return (a._organic ? 1 : 0) - (b._organic ? 1 : 0);
   });
 
-  const lines2 = [OUT_COLS.join(",")];
+  // CSV
+  const csvLines = [OUT_COLS.join(",")];
   out.forEach(r => {
-    lines2.push(OUT_COLS.map(c => {
+    csvLines.push(OUT_COLS.map(c => {
       const v = String(r[c] ?? "");
       return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
     }).join(","));
   });
-  csvContent = "\uFEFF" + lines2.join("\n");
+  csvContent = "\uFEFF" + csvLines.join("\n");
 
   renderPreview(out);
-  showDetected(detectedMedia);
+  renderChips('kept-wrap', 'kept-list', keptMedia, 'ok');
+  renderChips('excluded-wrap', 'excluded-list', excludedMedia, 'ex');
 
-  let msg = "✓ 完成！共 " + out.length + " 列";
+  let msg = "✓ 完成！輸出 " + out.length + " 列";
+  if (excludedMedia.size > 0) msg += "，排除 " + excludedMedia.size + " 個子廣告活動";
   let type = "ok";
   if (unknownGames.size > 0) {
-    msg += "（⚠ 未對應到的 game：" + [...unknownGames].join("、") + "，遊戲欄位留空）";
+    msg += "（⚠ 未對應的 game：" + [...unknownGames].join("、") + "）";
     type = "warn";
   }
   setStatus(msg, type);
@@ -389,16 +472,16 @@ function renderPreview(rows) {
   tbl.innerHTML = html;
 }
 
-function showDetected(detected) {
-  const wrap = document.getElementById('detected-wrap');
-  const list = document.getElementById('chip-list');
-  if (!detected || detected.size === 0) { wrap.style.display = 'none'; return; }
-  wrap.style.display = 'block';
+function renderChips(wrapId, listId, dataMap, kind) {
+  const wrap = document.getElementById(wrapId);
+  const list = document.getElementById(listId);
+  if (!dataMap || dataMap.size === 0) { wrap.classList.add('hide'); return; }
+  wrap.classList.remove('hide');
   list.innerHTML = '';
-  const entries = [...detected.entries()].sort((a,b) => b[1] - a[1]);
+  const entries = [...dataMap.entries()].sort((a,b) => b[1] - a[1]);
   for (const [name, count] of entries) {
     const chip = document.createElement('span');
-    chip.className = 'chip';
+    chip.className = 'chip ' + kind;
     chip.textContent = name + " ×" + count;
     list.appendChild(chip);
   }
@@ -421,30 +504,36 @@ function setStatus(msg, type) {
   el.className = type === "ok" ? "status-ok" : type === "warn" ? "status-warn" : "status-err";
 }
 
+// 範例（混合多個媒體與多種子廣告活動）
 function loadSample() {
   const sample = [
-    "game\t類別\tdevice\t廣告目標\t媒體\tarea\t欲花總預算\t預算占比\t月總下載",
-    "印尼合併\t成效型\tAN\t自然\tOrganic\t\t\t\t27000",
-    "\t\t\t含金\tFB\tID\t450000\t27%\t8090",
-    "\t\t\t\tTiktok\tID\t912000\t55%\t11055",
-    "\t\t\t\tGoogle Ads\tID\t180000\t10%\t3200",
-    "\t\t\t\tmoloco_int\tID\t207000\t12%\t6900",
-    "\t\t\t\tUnity Ads\tID\t90000\t5%\t1800",
-    "\t\t\t\tAppLovin\tID\t60000\t3%\t1200",
-    "\t\t\t\tAppsflyer\tID\t13257\t1%\t",
-    "\t\t\t\t含金Overall\t\t1582257\t95%\t26045",
-    "\t\t\t回流\tFB\tID\t29700\t2%\t149",
-    "\t\t\t\tTiktok\tID\t59400\t4%\t322",
-    "\t\t\t\tAppsflyer\tTW\t235\t0%\t",
-    "\t\t\t\t回流Overall\t\t89100\t5%\t470",
-    "\t\tIOS\t自然\tOrganic\t\t\t\t2040",
-    "\t\t\t含金\tApple Search Ads\tID\t120000\t80%\t750",
-    "\t\t\t\tFB\tID\t30000\t20%\t120",
-    "\t\t\t\tAppsflyer\tID\t435\t0%\t",
-    "\t\t\t\t安裝Overall\t\t150435\t100%\t870"
+    "game\t類別\tdevice\t廣告目標\t媒體\tarea\t欲花總預算\t月總下載",
+    "印尼合併\t成效型\tAN\t自然\tOrganic\t\t\t27000",
+    "\t\tAN\t含金\tFB\tID\t450000\t8090",
+    "\t\tAN\t\tdomino VO\tID\t198000\t4400",
+    "\t\tAN\t\tpoker LAL VO\tID\t135000\t1350",
+    "\t\tAN\t\tpoker AEO\tID\t117000\t2340",
+    "\t\tAN\t\tTiktok\tID\t912000\t11055",
+    "\t\tAN\t\tpoker smart+\tID\t270000\t2250",
+    "\t\tAN\t\tpoker尊榮LAL\tID\t165000\t1100",
+    "\t\tAN\t\tmoloco_int\tID\t207000\t6900",
+    "\t\tAN\t\tAppsflyer\tID\t13257\t",
+    "\t\tAN\t\t含金Overall\t\t1582257\t26045",
+    "\t\tAN\t回流\tFB\tID\t29700\t149",
+    "\t\tAN\t\t站內/FB動態名單\tID\t29700\t149",
+    "\t\tAN\t\tTiktok\tID\t59400\t322",
+    "\t\tAN\t\t大戶名單\tID\t29700\t248",
+    "\t\tAN\t\t一般付費\tID\t29700\t74",
+    "\t\tAN\t\tAppsflyer\tTW\t235\t",
+    "\t\tAN\t\t回流Overall\t\t89100\t470",
+    "印尼合併\t\tIOS\t自然\tOrganic\t\t\t2040",
+    "\t\tIOS\t含金\tApple Search Ads\tID\t120000\t750",
+    "\t\tIOS\t\tFB\tID\t30000\t120",
+    "\t\tIOS\t\tAppsflyer\tID\t435\t",
+    "\t\tIOS\t\t安裝Overall\t\t150435\t870"
   ].join("\n");
   document.getElementById('paste-area').value = sample;
-  setStatus("已載入範例（含 Google Ads / Unity Ads / AppLovin 等其他媒體）", "warn");
+  setStatus("已載入範例（含子廣告活動：domino VO, poker AEO, 站內/FB動態名單 等）", "warn");
 }
 </script>
 </body>
