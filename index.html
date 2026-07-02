@@ -416,12 +416,15 @@ function generate() {
     const gameNum = gameKey ? GAME_MAP[gameKey] : "";
     if (r.game && !gameKey) unknownGames.add(r.game);
 
-    keptMedia.set(media, (keptMedia.get(media) || 0) + 1);
+    // 媒體名稱正規化
+    const mediaNorm = /^tiktok$/i.test(media) ? "TikTok" : media;
+
+    keptMedia.set(mediaNorm, (keptMedia.get(mediaNorm) || 0) + 1);
 
     out.push({
       "起始日期": start, "結束日期": end,
       "平台": platNum, "遊戲": gameNum,
-      "媒體名稱": media, "廣告活動": "",
+      "媒體名稱": mediaNorm, "廣告活動": "",
       "國家": country, "優化方式": optim, "動能分類": "",
       "預算": cleanNum(r.budget),
       "預估安裝數": cleanNum(r.installs),
@@ -515,12 +518,12 @@ function loadSample() {
     "game\t類別\tdevice\t廣告目標\t媒體\tarea\t欲花總預算\t月總下載",
     "印尼合併\t成效型\tAN\t自然\tOrganic\t\t\t35870",
     "\t\tAN\t含金\tFB\tID\t450000\t10700",
-    "\t\tAN\t\tTiktok\tID\t912000\t14913",
+    "\t\tAN\t\tTikTok\tID\t912000\t14913",
     "\t\tAN\t\tmoloco_int\tID\t207000\t8625",
     "\t\tAN\t\tAppsflyer\tID\t17354\t",
     "\t\tAN\t\t含金Overall\t\t1586354\t34238",
     "\t\tAN\t回流\tFB\tID\t29700\t149",
-    "\t\tAN\t\tTiktok\tID\t59400\t322",
+    "\t\tAN\t\tTikTok\tID\t59400\t322",
     "\t\tAN\t\tAppsflyer\tID\t235\t",
     "\t\tAN\t\t回流Overall\t\t89335\t471",
     "印尼合併\t\tIOS\t自然\tOrganic\t\t\t2120",
